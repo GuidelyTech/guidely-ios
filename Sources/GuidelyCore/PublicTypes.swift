@@ -1,7 +1,7 @@
 import Foundation
 
 public let GuidelySDKName = "guidely-ios"
-public let GuidelySDKVersion = "0.1.0"
+public let GuidelySDKVersion = "0.2.0"
 
 public enum GuidelyConsent: String, Sendable, Codable {
     /// Events are sent.
@@ -93,17 +93,19 @@ public struct GuidelyOptions {
     /// Feature flags & experiments (on by default; `FlagsOptions(enabled: false)` turns them off).
     /// `nil` means the defaults.
     public var flags: FlagsOptions?
+    /// Session replay (off by default; also needs session replay enabled in the project settings).
+    public var sessionReplay: SessionReplayOptions
     /// Receives relative paths (`/Deals`) and custom-scheme deep links from buttons, checklist tasks
     /// and links. `http(s)` URLs open externally.
     public var onNavigate: ((URL) -> Void)?
     /// SDK errors (never thrown into the app).
     public var onError: ((Error) -> Void)?
 
-    public init(projectId: String, apiURL: URL = URL(string: "https://guidelytech.com")!, environment: GuidelyEnvironment? = nil, debug: Bool = false, analytics: Bool = true, consent: GuidelyConsent = .granted, appVersion: String? = nil, theme: GuidelyTheme? = nil, showChecklistLauncher: Bool = true, showResourceCenterLauncher: Bool = false, showMessengerLauncher: Bool = true, launcherBottomOffset: Double = 0, configRefreshInterval: TimeInterval = 300, storage: GuidelyStorageKind = .userDefaults, flags: FlagsOptions? = nil, onNavigate: ((URL) -> Void)? = nil, onError: ((Error) -> Void)? = nil) {
+    public init(projectId: String, apiURL: URL = URL(string: "https://guidelytech.com")!, environment: GuidelyEnvironment? = nil, debug: Bool = false, analytics: Bool = true, consent: GuidelyConsent = .granted, appVersion: String? = nil, theme: GuidelyTheme? = nil, showChecklistLauncher: Bool = true, showResourceCenterLauncher: Bool = false, showMessengerLauncher: Bool = true, launcherBottomOffset: Double = 0, configRefreshInterval: TimeInterval = 300, storage: GuidelyStorageKind = .userDefaults, flags: FlagsOptions? = nil, sessionReplay: SessionReplayOptions = SessionReplayOptions(), onNavigate: ((URL) -> Void)? = nil, onError: ((Error) -> Void)? = nil) {
         self.projectId = projectId; self.apiURL = apiURL; self.environment = environment; self.debug = debug; self.analytics = analytics
         self.consent = consent; self.appVersion = appVersion; self.theme = theme; self.showChecklistLauncher = showChecklistLauncher
         self.showResourceCenterLauncher = showResourceCenterLauncher; self.showMessengerLauncher = showMessengerLauncher; self.launcherBottomOffset = launcherBottomOffset
-        self.configRefreshInterval = configRefreshInterval; self.storage = storage; self.flags = flags; self.onNavigate = onNavigate; self.onError = onError
+        self.configRefreshInterval = configRefreshInterval; self.storage = storage; self.flags = flags; self.sessionReplay = sessionReplay; self.onNavigate = onNavigate; self.onError = onError
     }
 
     public var resolvedEnvironment: GuidelyEnvironment { environment ?? .infer(fromKey: projectId) }
@@ -174,6 +176,8 @@ struct SessionState {
     var events: [String] = []
     /// `experimentKey|variationId|hashValue` already tracked as `experiment_viewed` this session.
     var experimentsViewed = Set<String>()
+    /// Session replay sampling decision (nil until made; `startSessionRecording` / `stopSessionRecording` override it).
+    var replay: Bool?
 }
 
 /// Types of listener events (`on(_:_:)`).

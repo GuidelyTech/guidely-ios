@@ -98,6 +98,11 @@ public final class GuidelyEngine: StepControllerHost {
     public private(set) var messenger: MessengerController?
     /// Feature flags & experiments (nil when `options.flags?.enabled == false`).
     public private(set) var flags: GuidelyFlagsClient?
+    /// Screenshots for session replay (the `Guidely` facade sets the UIKit capturer; nil = never record).
+    public var replayCapturer: GuidelyScreenCapturer? {
+        didSet { if replayCapturer !== oldValue { recorder?.destroy(); recorder = nil; syncReplay() } }
+    }
+    private(set) var recorder: SessionRecorder?
     private var messengerView: GuidelyViewHandle?
     private var timers: [GuidelyCancellable] = []
     private var visibilityObservers: [String: GuidelyCancellable] = [:]
@@ -220,6 +225,7 @@ public final class GuidelyEngine: StepControllerHost {
         if let config { emit(.ready(config)) }
         renderPersistentWidgets()
         evaluate(.ready)
+        syncReplay()
     }
 
     @discardableResult
@@ -299,6 +305,7 @@ public final class GuidelyEngine: StepControllerHost {
             renderPersistentWidgets()
             if isReady { evaluate(.ready) }
         }
+        syncReplay()
     }
 
     /// App moved to the background: flush events and remember when.
@@ -306,6 +313,7 @@ public final class GuidelyEngine: StepControllerHost {
         isForeground = false
         backgroundedAt = scheduler.now
         messenger?.setForeground(false)
+        recorder?.setForeground(false)
         flags?.handleBackground()
         spawn { [weak self] in await self?.queue.flushAll() }
     }
@@ -318,11 +326,14 @@ public final class GuidelyEngine: StepControllerHost {
         if let bg = backgroundedAt {
             let timeout = (config?.settings.sessionTimeoutMinutes ?? 30) * 60
             if now.timeIntervalSince(bg) >= timeout {
+                recorder?.stop() // the recording belongs to the previous session; restarted below when sampled
                 session = SessionState(id: "s_\(GuidelyUtils.randomId(16))", startedAt: now)
                 firedDelays.removeAll()
                 log("new session \(session.id)")
             }
         }
+        recorder?.setForeground(true)
+        syncReplay()
         guard backgroundedAt != nil else { return } // launch also posts willEnterForeground
         backgroundedAt = nil
         flags?.handleForeground()
@@ -334,6 +345,7 @@ public final class GuidelyEngine: StepControllerHost {
     /// Flushes queued events now.
     public func flush() async {
         await queue.flushAll()
+        await recorder?.flush()
         await flags?.flushUsage()
     }
 
@@ -357,6 +369,8 @@ public final class GuidelyEngine: StepControllerHost {
         pollTimer?.cancel()
         refreshTimer?.cancel()
         queue.destroy()
+        recorder?.destroy()
+        recorder = nil
         flags?.destroy()
         listeners.removeAll()
     }
@@ -490,6 +504,7 @@ public final class GuidelyEngine: StepControllerHost {
         store.set(StoreKeys.anon, anonymousId)
         state = PersistedState()
         persistState()
+        recorder?.stop() // the recording belongs to the previous user; restarted below when sampled
         session = SessionState(id: "s_\(GuidelyUtils.randomId(16))", startedAt: scheduler.now)
         lastAudiences = []
         firedDelays.removeAll()
@@ -507,6 +522,7 @@ public final class GuidelyEngine: StepControllerHost {
             renderPersistentWidgets()
             evaluate(.identify)
         }
+        syncReplay()
     }
 
     public var userId: String? { (user?.id).flatMap { $0.isEmpty ? nil : $0 } }
@@ -517,6 +533,8 @@ public final class GuidelyEngine: StepControllerHost {
     public func setConsent(_ consent: GuidelyConsent) {
         self.consent = consent
         if consent == .denied { queue.clear() } else if consent == .granted { spawn { [weak self] in await self?.queue.flush() } }
+        if consent != .granted { recorder?.stop(discard: true) }
+        syncReplay()
     }
 
     func analyticsEnabled() -> Bool {
@@ -536,6 +554,12 @@ public final class GuidelyEngine: StepControllerHost {
             url: collectUrls() ? currentUrl() : nil, properties: properties.map { GuidelyUtils.sanitizeProperties($0) }
         )
         queue.enqueue(event)
+        if let recorder, recorder.isRecording {
+            var payload: [String: Any] = ["name": name.rawValue]
+            if let customName { payload["customName"] = customName }
+            if let guideId { payload["guideId"] = guideId }
+            recorder.addCustomEvent(tag: "guidely", payload: payload)
+        }
         emit(.track(event))
         return event
     }
@@ -557,6 +581,7 @@ public final class GuidelyEngine: StepControllerHost {
         currentScreen = trimmed.isEmpty ? nil : trimmed
         syncFlagAttributes()
         let path = GuidelyUtils.screenPath(trimmed)
+        recorder?.screenChanged(path)
         enqueue(.pageView, properties: ["path": .string(path), "screen": .string(trimmed)])
         log("screen \(path)")
         handleNavigation(path)
@@ -1392,7 +1417,7 @@ public final class GuidelyEngine: StepControllerHost {
             "configVersion": config?.configVersion as Any, "guides": guides.map(\.key), "screen": currentScreen as Any,
             "activeGuide": active.map { ["key": $0.guide.key, "step": $0.controller?.stepId as Any, "status": $0.controller?.status.rawValue as Any] } as Any,
             "queued": queued.map(\.guide.key), "widgets": widgets.keys.compactMap { findGuide($0)?.key }, "pendingEvents": queue.size,
-            "sessionId": session.id, "flags": flags?.debugState as Any,
+            "sessionId": session.id, "recording": isRecording, "flags": flags?.debugState as Any,
         ]
     }
 
@@ -1400,6 +1425,74 @@ public final class GuidelyEngine: StepControllerHost {
 
     private func persistUser() {
         if let user { store.writeJSON(StoreKeys.user(options.projectId), user) } else { store.remove(StoreKeys.user(options.projectId)) }
+    }
+
+    // MARK: - Session replay
+
+    /// The current analytics session id (rotates after the background timeout and on `reset()`; also the recording id).
+    public var sessionId: String { session.id }
+
+    /// True while this session is being recorded.
+    public var isRecording: Bool { recorder?.isRecording ?? false }
+
+    /// Records this session even when it was not sampled, provided session replay is enabled in the
+    /// project and the SDK options (and analytics + consent allow it). Sticks for the rest of the session.
+    public func startSessionRecording() {
+        session.replay = true
+        syncReplay()
+    }
+
+    /// Stops recording for the rest of this session (what was recorded so far is uploaded).
+    public func stopSessionRecording() {
+        session.replay = false
+        recorder?.stop()
+    }
+
+    /// Starts or stops recording to match the options, project settings, consent and session sample. Idempotent.
+    func syncReplay() {
+        if isDestroyed { return }
+        let opts = options.sessionReplay
+        guard isReady, opts.enabled, let settings = config?.settings.replay, settings.enabled, analyticsEnabled(), let capturer = replayCapturer else {
+            recorder?.stop(discard: !analyticsEnabled())
+            return
+        }
+        if session.replay == nil {
+            session.replay = GuidelyUtils.rolloutBucket(subject: session.id, salt: "replay") < settings.sampleRate
+            if session.replay == false { log("session \(session.id) not sampled for replay (\(settings.sampleRate)%)") }
+        }
+        guard session.replay == true else {
+            recorder?.stop()
+            return
+        }
+        let rec = recorder ?? SessionRecorder(
+            capturer: capturer, api: api, scheduler: scheduler,
+            spawn: { [weak self] work in self?.spawn(work) },
+            meta: { [weak self] in self?.replayMeta() ?? ReplayChunkMeta(anonymousId: "", deviceType: "mobile", os: "ios", sdkName: GuidelySDKName, sdkVersion: GuidelySDKVersion) },
+            onDisabled: { [weak self] id in
+                guard let self, id == self.session.id else { return }
+                self.log("session replay is disabled for this project; stopping")
+                self.session.replay = false
+                self.recorder?.stop(discard: true)
+            },
+            log: { [weak self] msg in self?.log(msg) }
+        )
+        recorder = rec
+        let rules = ReplayMaskRules(
+            maskAllText: opts.maskAllText || settings.maskAllText,
+            maskAllImages: opts.maskAllImages,
+            blockedIds: Set(settings.blockSelectors.compactMap { GuidelyUtils.guidelyIdFromSelector($0) })
+        )
+        if !rec.isRecording { log("recording session \(session.id)") }
+        rec.start(sessionId: session.id, rules: rules, interval: opts.captureInterval, href: currentUrl())
+    }
+
+    private func replayMeta() -> ReplayChunkMeta {
+        ReplayChunkMeta(
+            anonymousId: anonymousId, userId: userId, url: collectUrls() ? currentUrl() : nil,
+            deviceType: hostInfo.device.type, os: hostInfo.device.os ?? hostInfo.platform,
+            viewportWidth: recorder?.viewport?.width, viewportHeight: recorder?.viewport?.height,
+            sdkName: GuidelySDKName, sdkVersion: GuidelySDKVersion
+        )
     }
 
     func reportError(_ err: Error) {

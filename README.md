@@ -18,7 +18,7 @@ and add the **Guidely** product to your app target. Or in `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/GuidelyTech/guidely-ios.git", from: "0.1.0"),
+    .package(url: "https://github.com/GuidelyTech/guidely-ios.git", from: "0.2.0"),
 ],
 targets: [
     .target(name: "MyApp", dependencies: [.product(name: "Guidely", package: "guidely-ios")]),
@@ -31,7 +31,7 @@ targets: [
 pod 'GuidelyTech', '~> 0.1'
 # or straight from the repository (works for every release, including those after CocoaPods trunk
 # became read-only on 2 December 2026):
-pod 'GuidelyTech', :git => 'https://github.com/GuidelyTech/guidely-ios.git', :tag => '0.1.0'
+pod 'GuidelyTech', :git => 'https://github.com/GuidelyTech/guidely-ios.git', :tag => '0.2.0'
 ```
 
 The pod's module is `Guidely` (`import Guidely`).
@@ -374,6 +374,77 @@ Guidely.shared.setConsent(.denied)     // drops queued events, stops sending
 
 Analytics are also off when `analytics: false` or the project disables analytics. Guides still render.
 
+## Session replay
+
+Records sessions as masked screenshots plus touches and plays them back in the dashboard's
+session-replay player, next to the session's analytics events. Recording is **opt-in in the app**:
+screenshots of a native app are more sensitive than a masked web page, so ticking the project
+setting alone never starts recording an existing app.
+
+```swift
+Guidely.configure(GuidelyOptions(
+    projectId: "pk_live_…",
+    sessionReplay: SessionReplayOptions(
+        enabled: true,        // default false
+        maskAllText: false,   // mask all text, not only text fields (also forced by the project setting)
+        maskAllImages: false, // mask UIImageView / SwiftUI images
+        captureInterval: 1    // seconds between screenshots (minimum 0.5)
+    )
+))
+```
+
+A session is recorded when the option is on, session replay is enabled in the project settings,
+analytics are allowed (`analytics: true`, consent `.granted`, project analytics on) and the session
+is sampled (the project's sample rate, decided once per session). Recording pauses in the
+background (what was recorded is uploaded inside a background task) and resumes on return. A new
+session (after the session timeout in the background, or `reset()`) starts a new recording.
+`setConsent(.denied / .pending)` stops recording and **discards** whatever is buffered.
+
+```swift
+Guidely.shared.startSessionRecording() // record this session even if it was not sampled
+Guidely.shared.stopSessionRecording()  // stop for the rest of the session (uploads what was recorded)
+Guidely.shared.isRecording             // true while recording
+Guidely.shared.sessionId               // the analytics session id (also the recording id)
+```
+
+### Masking
+
+Masked areas are painted over with opaque grey rectangles **on the device, before the frame is
+encoded**. The unmasked pixels are never sent.
+
+* Always: `UITextField` (SwiftUI `TextField`, `SecureField`, search fields) and editable `UITextView`
+  (`TextEditor`). The keyboard is never captured.
+* `maskAllText`: also every `UILabel`, `UITextView` and SwiftUI `Text`.
+* `maskAllImages`: every `UIImageView` and SwiftUI `Image`.
+* Explicitly: `.guidelyMask()` on a SwiftUI view, `view.guidelyMask = true` on a `UIView`. Masking a
+  container masks everything inside it.
+* The project's replay block selectors: `#id` / `[data-guidely-id="id"]` selectors mask the targets
+  registered with that Guidely id (`.guidelyTarget(id)` / `view.guidelyId`).
+
+SwiftUI draws text and images in private views and layers rather than `UILabel` / `UIImageView`;
+the SDK recognises them by class name (verified on iOS 27, where text is drawn in `CGDrawingLayer`s).
+A future iOS release could change those internals, so mark views that must never be recorded with
+`.guidelyMask()` rather than relying on `maskAllText` alone. Web views, maps and video are captured
+as pixels like everything else: mask them explicitly if they can show sensitive data.
+
+### How it works and limitations
+
+* Every `captureInterval` the SDK draws the scene's visible windows (`drawHierarchy`, Guidely's own
+  overlay included, keyboard windows excluded) at 1 pixel per point, paints the masks and encodes a
+  JPEG (quality 0.6) off the main thread. Identical frames are skipped; typical frames are 20–80 KB.
+* Cadence: no screenshot while a finger is down (drags and scrolls stay smooth), one 0.2 s after
+  every touch ends, and after 3 unchanged screenshots in a row the interval stretches to
+  `min(4 × captureInterval, 5 s)` until the screen changes or there is a touch, `screen()` or
+  Guidely event.
+* Drawing a frame runs on the main thread (UIKit requires it): about 40 ms in a Debug build on the
+  iOS 27 simulator, not yet measured on devices. Raise `captureInterval` if your app is sensitive to
+  that.
+* Mask rectangles cover a view's laid-out frame and, while it animates, its on-screen
+  (presentation) frame too, so views moving during a transition stay covered.
+* The status bar is not part of the app's windows and is not recorded.
+* Uploads: gzip JSON chunks every 10 s (or 1 MB, and when the app goes to the background), one at a
+  time with retries; at most ~5 MB is kept in memory while offline and nothing is written to disk.
+
 ## Theming
 
 Cards use the dashboard's project theme (primary, background and text colours, corner radius, font),
@@ -467,6 +538,9 @@ uses `10.0.2.2`. Allow local networking (see Configure).
 | `on(_:_:) -> GuidelyListenerToken`, `off(_:)` | Listeners. |
 | `anonymousId`, `userId`, `isReady`, `debugState`, `registeredTargetIds` | Introspection. |
 | `View.guidelyTarget(_ id:)`, `UIView.guidelyId` | Register targets. |
+| `startSessionRecording()`, `stopSessionRecording()` | Force / stop session replay for this session. |
+| `isRecording`, `sessionId` | Replay status, current session id. |
+| `View.guidelyMask(_:)`, `UIView.guidelyMask` | Mask a view in session recordings. |
 | `View.guidelyScreen(_ name:)` | Record a screen on appear. |
 | `Guidely.isFeatureEnabled(_:default:)` | Boolean flag value; default for missing or non-boolean flags (any thread). |
 | `Guidely.featureValue(_:default:)`, `featureString` / `featureNumber` / `featureBool` / `featureJSON` | Typed flag values. |

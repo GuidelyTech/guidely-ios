@@ -695,9 +695,12 @@ public struct SdkSettings: Decodable, Sendable, Hashable {
     public var collectUrls: Bool
     public var maskSelectors: [String]
     public var sessionTimeoutMinutes: Double
+    /// Session replay project settings (absent = off).
+    public var replay: ReplayProjectSettings
 
-    public init(analyticsEnabled: Bool = true, collectUrls: Bool = true, maskSelectors: [String] = [], sessionTimeoutMinutes: Double = 30) {
+    public init(analyticsEnabled: Bool = true, collectUrls: Bool = true, maskSelectors: [String] = [], sessionTimeoutMinutes: Double = 30, replay: ReplayProjectSettings = ReplayProjectSettings()) {
         self.analyticsEnabled = analyticsEnabled; self.collectUrls = collectUrls; self.maskSelectors = maskSelectors; self.sessionTimeoutMinutes = sessionTimeoutMinutes
+        self.replay = replay
     }
 
     public init(from decoder: Decoder) throws {
@@ -706,6 +709,7 @@ public struct SdkSettings: Decodable, Sendable, Hashable {
         collectUrls = c.lenient("collectUrls", true)
         maskSelectors = c.strings("maskSelectors") ?? []
         sessionTimeoutMinutes = c.lenient("sessionTimeoutMinutes", 30)
+        replay = c.lenient("replay", ReplayProjectSettings())
     }
 }
 

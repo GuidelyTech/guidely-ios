@@ -5,8 +5,9 @@ import UIKit
 import GuidelyCore
 #endif
 
-/// Guidely for iOS: in-app tours, tooltips, checklists, surveys, a resource center, and feature
-/// flags & experiments (`Guidely.isFeatureEnabled(_:)`, `@FeatureFlag`, see FeatureFlags.swift).
+/// Guidely for iOS: in-app tours, tooltips, checklists, surveys, a resource center, feature
+/// flags & experiments (`Guidely.isFeatureEnabled(_:)`, `@FeatureFlag`, see FeatureFlags.swift) and
+/// session replay (`GuidelyOptions.sessionReplay`, `.guidelyMask()`, see ReplayCapture.swift).
 ///
 /// ```swift
 /// Guidely.configure(GuidelyOptions(projectId: "pk_dev_…"))
@@ -63,6 +64,7 @@ public final class Guidely {
         let engine = GuidelyEngine(options: options, transport: transport ?? URLSessionTransport(), hostInfo: host)
         engine.presenter = overlay
         engine.targetResolver = GuidelyTargetRegistry.shared
+        if options.sessionReplay.enabled { engine.replayCapturer = UIKitScreenCapturer() }
         overlay.model.navigate = { [weak engine] url in engine?.navigate(url.absoluteString) }
         overlay.log = { [weak engine] msg in engine?.log(msg) }
         GuidelyTargetRegistry.shared.onTap = { [weak engine] id in engine?.handleTargetTap(id) }
@@ -228,6 +230,21 @@ public final class Guidely {
 
     /// Whether the Scout messenger is enabled for this app (config loaded and iOS ticked in Scout settings).
     public var isMessengerEnabled: Bool { engine?.messenger != nil }
+
+    // MARK: Session replay
+
+    /// Records the current session even when it was not sampled. Needs session replay enabled in the
+    /// project settings and `GuidelyOptions.sessionReplay`, and analytics + consent.
+    public func startSessionRecording() { requireEngine("startSessionRecording")?.startSessionRecording() }
+
+    /// Stops recording for the rest of the current session (what was recorded is uploaded).
+    public func stopSessionRecording() { engine?.stopSessionRecording() }
+
+    /// True while the current session is being recorded.
+    public var isRecording: Bool { engine?.isRecording ?? false }
+
+    /// The analytics session id (also the recording id in the dashboard). nil until configured.
+    public var sessionId: String? { engine?.sessionId }
 
     // MARK: Config & events
 

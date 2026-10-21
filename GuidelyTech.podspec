@@ -1,7 +1,7 @@
 Pod::Spec.new do |s|
   s.name             = 'GuidelyTech'
   s.module_name      = 'Guidely'
-  s.version          = '0.1.0'
+  s.version          = '0.2.0'
   s.summary          = 'Guidely in-app guides for iOS: tours, tooltips, checklists, surveys and a resource center.'
   s.description      = <<-DESC
     The native iOS SDK for Guidely (guidelytech.com). Renders guides published from the Guidely
